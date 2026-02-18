@@ -3,6 +3,8 @@
 一个基于 **Vercel AI SDK** 的 GitHub Issue 分析 Agent。  
 输入一个 Issue 链接（或仓库 + 编号），系统会自动拉取 issue / comments / 代码证据，生成可落地的分析报告（Markdown）。
 
+![Issue Agent](./imgs/index.png)
+
 ---
 
 ## 功能亮点
