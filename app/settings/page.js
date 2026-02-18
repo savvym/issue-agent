@@ -58,7 +58,7 @@ export default function SettingsPage() {
         <p className="kicker">Provider Control</p>
         <h1>模型 Provider 设置</h1>
         <p className="subtitle">
-          你可以在这里配置 OpenAI 兼容 Provider 与 GitHub Token（Base URL、API Key、API 类型、默认模型等）。这些设置保存在当前浏览器。
+          你可以在这里配置 OpenAI 兼容 Provider 与 GitHub Token（Base URL、API Key、API 类型、默认模型、默认输出语言等）。这些设置保存在当前浏览器。
         </p>
       </section>
 
@@ -94,6 +94,15 @@ export default function SettingsPage() {
               value={form.defaultModel}
               onChange={(e) => handleChange('defaultModel', e.target.value)}
               placeholder="gpt-4.1"
+            />
+          </label>
+
+          <label>
+            <span>Default Language</span>
+            <input
+              value={form.language}
+              onChange={(e) => handleChange('language', e.target.value)}
+              placeholder="zh-CN"
             />
           </label>
 

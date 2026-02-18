@@ -12,12 +12,11 @@ import {
 
 const defaultForm = {
   issueUrl: '',
-  repo: '',
-  issueNumber: '',
-  lang: 'zh-CN',
-  model: 'gpt-4.1',
-  apiType: 'responses',
 };
+
+const SESSION_STORAGE_KEY = 'issue-agent.sessions.v1';
+const MAX_SESSIONS = 40;
+const SIDEBAR_COLLAPSED_STORAGE_KEY = 'issue-agent.sidebar-collapsed.v1';
 
 function formatDuration(seconds) {
   if (seconds < 60) {
@@ -42,31 +41,176 @@ function formatTimeLabel(value) {
   return timestamp.toLocaleTimeString();
 }
 
+function parseSseMessage(raw) {
+  const lines = raw.split('\n');
+  let event = 'message';
+  const dataLines = [];
+
+  for (const line of lines) {
+    if (!line) {
+      continue;
+    }
+
+    if (line.startsWith('event:')) {
+      event = line.slice(6).trim();
+      continue;
+    }
+
+    if (line.startsWith('data:')) {
+      dataLines.push(line.slice(5).trimStart());
+    }
+  }
+
+  if (dataLines.length === 0) {
+    return null;
+  }
+
+  const dataText = dataLines.join('\n');
+  try {
+    return {
+      event,
+      data: JSON.parse(dataText),
+    };
+  } catch {
+    return {
+      event,
+      data: dataText,
+    };
+  }
+}
+
+function parseIssueDescriptor(issueUrl) {
+  const match = issueUrl.match(/https?:\/\/github\.com\/([^/]+)\/([^/]+)\/issues\/(\d+)/i);
+  if (!match) {
+    return {
+      repository: '',
+      issueNumber: '',
+      label: issueUrl.replace(/^https?:\/\//i, ''),
+      key: issueUrl,
+    };
+  }
+
+  const [, owner, repo, issueNumber] = match;
+  const repository = `${owner}/${repo}`;
+  return {
+    repository,
+    issueNumber,
+    label: `${repository} #${issueNumber}`,
+    key: `${repository}#${issueNumber}`,
+  };
+}
+
+function createSession(issueUrl) {
+  const descriptor = parseIssueDescriptor(issueUrl);
+  const now = new Date().toISOString();
+  const id = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}`;
+
+  return {
+    id,
+    issueUrl,
+    repository: descriptor.repository,
+    issueNumber: descriptor.issueNumber,
+    key: descriptor.key,
+    label: descriptor.label,
+    status: 'running',
+    runId: '',
+    createdAt: now,
+    updatedAt: now,
+    trace: [],
+    markdown: '',
+    result: null,
+    error: '',
+    errorDetail: null,
+  };
+}
+
+function normalizeSession(raw) {
+  if (!raw || typeof raw !== 'object') {
+    return null;
+  }
+
+  const issueUrl = typeof raw.issueUrl === 'string' ? raw.issueUrl : '';
+  const descriptor = parseIssueDescriptor(issueUrl);
+  const status =
+    raw.status === 'running' || raw.status === 'completed' || raw.status === 'failed'
+      ? raw.status
+      : 'completed';
+
+  return {
+    id: typeof raw.id === 'string' ? raw.id : `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    issueUrl,
+    repository: typeof raw.repository === 'string' ? raw.repository : descriptor.repository,
+    issueNumber: typeof raw.issueNumber === 'string' ? raw.issueNumber : descriptor.issueNumber,
+    key: typeof raw.key === 'string' ? raw.key : descriptor.key,
+    label: typeof raw.label === 'string' && raw.label ? raw.label : descriptor.label,
+    status,
+    runId: typeof raw.runId === 'string' ? raw.runId : '',
+    createdAt: typeof raw.createdAt === 'string' ? raw.createdAt : new Date().toISOString(),
+    updatedAt: typeof raw.updatedAt === 'string' ? raw.updatedAt : new Date().toISOString(),
+    trace: Array.isArray(raw.trace) ? raw.trace : [],
+    markdown: typeof raw.markdown === 'string' ? raw.markdown : '',
+    result: raw.result ?? null,
+    error: typeof raw.error === 'string' ? raw.error : '',
+    errorDetail: raw.errorDetail ?? null,
+  };
+}
+
+function loadSessions() {
+  if (typeof window === 'undefined') {
+    return [];
+  }
+
+  const raw = window.localStorage.getItem(SESSION_STORAGE_KEY);
+  if (!raw) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+
+    return parsed
+      .map(normalizeSession)
+      .filter(Boolean)
+      .slice(0, MAX_SESSIONS);
+  } catch {
+    return [];
+  }
+}
+
+function SendArrowIcon() {
+  return (
+    <svg viewBox="0 0 16 16" aria-hidden="true" className="chat-send-icon">
+      <path d="M8 12.5V3.7" />
+      <path d="M4.7 7.1L8 3.7L11.3 7.1" />
+    </svg>
+  );
+}
+
 export default function Home() {
-  const [mode, setMode] = useState('url');
   const [form, setForm] = useState(defaultForm);
   const [providerSettings, setProviderSettings] = useState(defaultProviderSettings);
-  const [isRunning, setIsRunning] = useState(false);
-  const [activeRunId, setActiveRunId] = useState('');
+  const [sessions, setSessions] = useState([]);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [activeSessionId, setActiveSessionId] = useState('');
+  const [runningSessionId, setRunningSessionId] = useState('');
   const [startedAt, setStartedAt] = useState(null);
   const [elapsed, setElapsed] = useState(0);
-  const [error, setError] = useState('');
-  const [errorDetail, setErrorDetail] = useState(null);
-  const [trace, setTrace] = useState([]);
-  const [result, setResult] = useState(null);
 
   useEffect(() => {
     const loaded = loadProviderSettings();
     setProviderSettings(loaded);
-    setForm((prev) => ({
-      ...prev,
-      model: loaded.defaultModel || prev.model,
-      apiType: loaded.apiType || prev.apiType,
-    }));
+    setSessions(loadSessions());
+    setSidebarCollapsed(window.localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY) === '1');
 
     const handleStorage = (event) => {
       if (event.key === PROVIDER_SETTINGS_STORAGE_KEY) {
         setProviderSettings(loadProviderSettings());
+      }
+      if (event.key === SESSION_STORAGE_KEY) {
+        setSessions(loadSessions());
       }
     };
 
@@ -75,7 +219,29 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    if (!isRunning || !startedAt) {
+    if (sessions.length > 0 && !activeSessionId) {
+      setActiveSessionId(sessions[0].id);
+    }
+  }, [sessions, activeSessionId]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    window.localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(sessions.slice(0, MAX_SESSIONS)));
+  }, [sessions]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    window.localStorage.setItem(SIDEBAR_COLLAPSED_STORAGE_KEY, sidebarCollapsed ? '1' : '0');
+  }, [sidebarCollapsed]);
+
+  useEffect(() => {
+    if (!runningSessionId || !startedAt) {
       setElapsed(0);
       return;
     }
@@ -86,72 +252,105 @@ export default function Home() {
     }, 1000);
 
     return () => window.clearInterval(timer);
-  }, [isRunning, startedAt]);
+  }, [runningSessionId, startedAt]);
+
+  const activeSession = useMemo(() => {
+    if (sessions.length === 0) {
+      return null;
+    }
+
+    return sessions.find((session) => session.id === activeSessionId) || sessions[0];
+  }, [sessions, activeSessionId]);
 
   const statusText = useMemo(() => {
-    if (isRunning) {
-      const suffix = activeRunId ? ` · run ${activeRunId.slice(0, 8)}` : '';
-      return `分析进行中 · ${formatDuration(elapsed)}${suffix}`;
+    if (runningSessionId) {
+      return `分析进行中 · ${formatDuration(elapsed)}`;
     }
 
-    if (error) {
-      return '分析失败';
+    if (!activeSession) {
+      return '等待开始';
     }
 
-    if (result) {
+    if (activeSession.status === 'failed') {
+      return '上次分析失败';
+    }
+
+    if (activeSession.status === 'completed') {
       return '分析完成';
     }
 
     return '等待开始';
-  }, [activeRunId, elapsed, error, isRunning, result]);
-
-  const providerSummary = useMemo(() => {
-    const base = providerSettings.baseURL || 'default';
-    const keySource = providerSettings.apiKey ? 'settings key' : 'server env key';
-    const githubSource = providerSettings.githubToken ? 'settings token' : 'server env token';
-    return `Provider: openai-compatible · baseURL: ${base} · key: ${keySource} · github: ${githubSource}`;
-  }, [providerSettings]);
+  }, [runningSessionId, elapsed, activeSession]);
 
   const traceSummary = useMemo(() => {
-    if (trace.length === 0) {
-      return null;
+    const trace = activeSession?.trace || [];
+    const stageMap = new Map();
+
+    for (const event of trace) {
+      if (!event || typeof event.stage !== 'string' || !event.stage) {
+        continue;
+      }
+
+      stageMap.set(event.stage, {
+        stage: event.stage,
+        status: event.status === 'success' || event.status === 'error' ? event.status : 'start',
+      });
     }
 
-    const startedCount = trace.filter((event) => event.status === 'start').length;
-    const finishedCount = trace.filter((event) => event.status === 'success').length;
-    const errorCount = trace.filter((event) => event.status === 'error').length;
-    const latest = trace[trace.length - 1];
-    const latestStatusText =
-      latest?.status === 'start' ? '进行中' : latest?.status === 'success' ? '已完成' : '失败';
-
     return {
-      startedCount,
-      finishedCount,
-      errorCount,
-      latest,
-      latestStatusText,
+      stageItems: Array.from(stageMap.values()),
     };
-  }, [trace]);
+  }, [activeSession]);
 
-  const handleChange = (field, value) => {
-    setForm((prev) => ({ ...prev, [field]: value }));
+  const showWelcome = !activeSession;
+  const showReport = Boolean(activeSession?.markdown);
+  const showFailureOnly = Boolean(activeSession?.error && !activeSession?.markdown);
+  const showProgressOnly = Boolean(
+    activeSession?.status === 'running' && !activeSession.markdown && !activeSession.error,
+  );
+  const showEmptyResult = Boolean(
+    activeSession?.status === 'completed' && !activeSession.markdown && !activeSession.error,
+  );
+
+  const updateSession = (sessionId, updater) => {
+    setSessions((prev) =>
+      prev.map((session) => {
+        if (session.id !== sessionId) {
+          return session;
+        }
+        const next = updater(session);
+        return {
+          ...next,
+          updatedAt: new Date().toISOString(),
+        };
+      }),
+    );
   };
 
   const handleSubmit = async (event) => {
     event.preventDefault();
-    setError('');
-    setErrorDetail(null);
-    setTrace([]);
-    setResult(null);
-    setActiveRunId('');
-    setIsRunning(true);
+    if (runningSessionId) {
+      return;
+    }
+
+    const issueUrl = form.issueUrl.trim();
+    if (!issueUrl) {
+      return;
+    }
+
+    const session = createSession(issueUrl);
+    setSessions((prev) => [session, ...prev].slice(0, MAX_SESSIONS));
+    setActiveSessionId(session.id);
+    setRunningSessionId(session.id);
     setStartedAt(Date.now());
+    setForm(defaultForm);
 
     try {
       const payload = {
-        lang: form.lang.trim() || 'zh-CN',
-        model: form.model.trim() || providerSettings.defaultModel || 'gpt-4.1',
-        apiType: form.apiType === 'chat' ? 'chat' : 'responses',
+        issueUrl,
+        lang: providerSettings.language?.trim() || 'zh-CN',
+        model: providerSettings.defaultModel?.trim() || 'gpt-4.1',
+        apiType: providerSettings.apiType === 'chat' ? 'chat' : 'responses',
       };
 
       const provider = {};
@@ -182,292 +381,346 @@ export default function Home() {
         payload.githubToken = providerSettings.githubToken.trim();
       }
 
-      if (mode === 'url') {
-        payload.issueUrl = form.issueUrl.trim();
-      } else {
-        payload.repo = form.repo.trim();
-        payload.issueNumber = Number(form.issueNumber);
-      }
-
-      const startResponse = await fetch('/api/analyze/start', {
+      const streamResponse = await fetch('/api/analyze/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       });
 
-      const startData = await startResponse.json().catch(() => null);
-      if (!startResponse.ok) {
-        setError(startData?.error || `Request failed (${startResponse.status})`);
-        setErrorDetail(startData?.detail || null);
+      if (!streamResponse.ok || !streamResponse.body) {
+        const failedData = await streamResponse.json().catch(() => null);
+        updateSession(session.id, (current) => ({
+          ...current,
+          status: 'failed',
+          error: failedData?.error || `Request failed (${streamResponse.status})`,
+          errorDetail: failedData?.detail || null,
+        }));
         return;
       }
 
-      const runId = startData?.runId;
-      if (!runId || typeof runId !== 'string') {
-        setError('Run started but runId is missing.');
-        return;
-      }
-
-      setActiveRunId(runId);
-
-      let nextTraceIndex = 0;
+      const reader = streamResponse.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let doneSignalReceived = false;
 
       while (true) {
-        const statusResponse = await fetch(
-          `/api/analyze/status?runId=${encodeURIComponent(runId)}&after=${nextTraceIndex}`,
-          {
-            method: 'GET',
-            cache: 'no-store',
-          },
-        );
-
-        const statusData = await statusResponse.json().catch(() => null);
-        if (!statusResponse.ok) {
-          setError(statusData?.error || `Status request failed (${statusResponse.status})`);
-          setErrorDetail(statusData?.detail || null);
+        const { value, done } = await reader.read();
+        if (done) {
           break;
         }
 
-        const deltaTrace = Array.isArray(statusData?.trace) ? statusData.trace : [];
-        if (deltaTrace.length > 0) {
-          setTrace((prev) => [...prev, ...deltaTrace]);
+        buffer += decoder.decode(value, { stream: true });
+
+        while (true) {
+          const boundaryIndex = buffer.indexOf('\n\n');
+          if (boundaryIndex < 0) {
+            break;
+          }
+
+          const rawMessage = buffer.slice(0, boundaryIndex);
+          buffer = buffer.slice(boundaryIndex + 2);
+
+          const parsed = parseSseMessage(rawMessage);
+          if (!parsed) {
+            continue;
+          }
+
+          const { event: eventType, data } = parsed;
+
+          if (eventType === 'ready') {
+            const runId =
+              data && typeof data === 'object' && typeof data.runId === 'string' ? data.runId : '';
+            if (runId) {
+              updateSession(session.id, (current) => ({
+                ...current,
+                runId,
+              }));
+            }
+            continue;
+          }
+
+          if (eventType === 'trace') {
+            updateSession(session.id, (current) => ({
+              ...current,
+              trace: [...current.trace, data],
+            }));
+            continue;
+          }
+
+          if (eventType === 'report-delta') {
+            const deltaText =
+              data && typeof data === 'object' && typeof data.delta === 'string' ? data.delta : '';
+            if (deltaText) {
+              updateSession(session.id, (current) => ({
+                ...current,
+                markdown: `${current.markdown}${deltaText}`,
+              }));
+            }
+            continue;
+          }
+
+          if (eventType === 'result') {
+            updateSession(session.id, (current) => ({
+              ...current,
+              status: 'completed',
+              result: data,
+              markdown:
+                data && typeof data === 'object' && typeof data.markdown === 'string'
+                  ? data.markdown
+                  : current.markdown,
+              trace:
+                data && typeof data === 'object' && Array.isArray(data.trace) ? data.trace : current.trace,
+            }));
+            continue;
+          }
+
+          if (eventType === 'error') {
+            updateSession(session.id, (current) => ({
+              ...current,
+              status: 'failed',
+              error: data?.error || 'Analysis failed.',
+              errorDetail: data?.detail || null,
+              trace: Array.isArray(data?.trace) ? data.trace : current.trace,
+            }));
+            continue;
+          }
+
+          if (eventType === 'done') {
+            doneSignalReceived = true;
+            updateSession(session.id, (current) => ({
+              ...current,
+              status: current.status === 'running' ? 'completed' : current.status,
+            }));
+            break;
+          }
         }
 
-        nextTraceIndex =
-          typeof statusData?.traceIndex === 'number' ? statusData.traceIndex : nextTraceIndex + deltaTrace.length;
-
-        if (statusData?.status === 'completed') {
-          setResult(statusData?.result || null);
+        if (doneSignalReceived) {
           break;
         }
-
-        if (statusData?.status === 'failed') {
-          setError(statusData?.error || 'Analysis failed.');
-          setErrorDetail(statusData?.detail || null);
-          break;
-        }
-
-        await new Promise((resolve) => {
-          window.setTimeout(resolve, 900);
-        });
       }
     } catch (submitError) {
-      setError(submitError instanceof Error ? submitError.message : String(submitError));
-      setErrorDetail(null);
+      updateSession(session.id, (current) => ({
+        ...current,
+        status: 'failed',
+        error: submitError instanceof Error ? submitError.message : String(submitError),
+        errorDetail: null,
+      }));
     } finally {
-      setIsRunning(false);
+      setRunningSessionId('');
     }
   };
 
   return (
-    <main className="page-shell">
-      <div className="mesh" aria-hidden />
-      <section className="hero">
-        <p className="kicker">Issue Intelligence Desk</p>
-        <h1>GitHub Issue 分析 Agent</h1>
-        <p className="subtitle">
-          输入一个 Issue，自动完成问题归类、代码证据检索、根因假设和实施计划，输出可交付报告。
-        </p>
-      </section>
+    <main className={sidebarCollapsed ? 'chat-shell chat-shell-collapsed' : 'chat-shell'}>
+      <div className="chat-backdrop" aria-hidden />
 
-      <section className="panel">
-        <div className="panel-head">
-          <div className="mode-tabs" role="tablist" aria-label="Input mode">
+      <aside className="chat-sidebar">
+        <div className="chat-sidebar-top">
+          <p className={sidebarCollapsed ? 'chat-brand chat-brand-mini' : 'chat-brand'}>
+            {sidebarCollapsed ? 'IA' : 'Issue Agent'}
+          </p>
+
+          <div className="chat-sidebar-actions">
+            {!sidebarCollapsed ? (
+              <Link href="/settings" className="chat-sidebar-link">
+                设置
+              </Link>
+            ) : null}
             <button
               type="button"
-              className={mode === 'url' ? 'tab active' : 'tab'}
-              onClick={() => setMode('url')}
+              className="chat-collapse-btn"
+              onClick={() => setSidebarCollapsed((prev) => !prev)}
+              aria-label={sidebarCollapsed ? '展开侧栏' : '收起侧栏'}
             >
-              Issue URL
-            </button>
-            <button
-              type="button"
-              className={mode === 'repo' ? 'tab active' : 'tab'}
-              onClick={() => setMode('repo')}
-            >
-              Repo + Number
+              {sidebarCollapsed ? '>>' : '<<'}
             </button>
           </div>
-          <span className="status-badge">{statusText}</span>
         </div>
 
-        <p className="provider-caption">
-          {providerSummary} ·{' '}
-          <Link href="/settings" className="text-link">
-            打开设置页
-          </Link>
-        </p>
+        <p className="chat-sidebar-section-title">会话</p>
+        {sessions.length > 0 ? (
+          <ol className="chat-session-list">
+            {sessions.map((session) => (
+              <li key={session.id}>
+                <button
+                  type="button"
+                  className={session.id === activeSession?.id ? 'chat-session-item active' : 'chat-session-item'}
+                  onClick={() => setActiveSessionId(session.id)}
+                >
+                  <span className="chat-session-heading">
+                    <span className="chat-session-repo">{session.repository || 'GitHub Issue'}</span>
+                    <span className="chat-session-number">
+                      {session.issueNumber ? `#${session.issueNumber}` : sidebarCollapsed ? '#' : ''}
+                    </span>
+                  </span>
+                  <span className="chat-session-url">{session.issueUrl}</span>
+                  <span className="chat-session-meta">
+                    <span className={`session-status-dot status-${session.status}`} />
+                    <span>{formatTimeLabel(session.updatedAt)}</span>
+                  </span>
+                </button>
+              </li>
+            ))}
+          </ol>
+        ) : (
+          <p className="chat-session-empty">还没有会话，输入一个 Issue URL 开始分析。</p>
+        )}
 
-        <form className="form-grid" onSubmit={handleSubmit}>
-          {mode === 'url' ? (
-            <label>
-              <span>Issue URL</span>
+        {showReport ? (
+          <div className="chat-sidebar-composer">
+            <form className="chat-sidebar-form" onSubmit={handleSubmit}>
               <input
+                className="chat-sidebar-input"
                 value={form.issueUrl}
-                onChange={(e) => handleChange('issueUrl', e.target.value)}
-                placeholder="https://github.com/vercel/ai/issues/123"
+                onChange={(e) => setForm({ issueUrl: e.target.value })}
+                placeholder="继续分析新的 GitHub Issue URL..."
                 required
               />
-            </label>
-          ) : (
-            <>
-              <label>
-                <span>Repository</span>
-                <input
-                  value={form.repo}
-                  onChange={(e) => handleChange('repo', e.target.value)}
-                  placeholder="vercel/ai"
-                  required
-                />
-              </label>
-              <label>
-                <span>Issue Number</span>
-                <input
-                  value={form.issueNumber}
-                  onChange={(e) => handleChange('issueNumber', e.target.value)}
-                  placeholder="123"
-                  type="number"
-                  min="1"
-                  required
-                />
-              </label>
-            </>
-          )}
+              <button
+                className="chat-send-btn chat-send-btn-sidebar"
+                type="submit"
+                disabled={Boolean(runningSessionId)}
+                aria-label={runningSessionId ? '分析中' : '提交分析'}
+                title={runningSessionId ? '分析中' : '提交分析'}
+              >
+                {runningSessionId ? '…' : <SendArrowIcon />}
+              </button>
+            </form>
+          </div>
+        ) : null}
+      </aside>
 
-          <label>
-            <span>Language</span>
-            <input value={form.lang} onChange={(e) => handleChange('lang', e.target.value)} />
-          </label>
-
-          <label>
-            <span>Model</span>
-            <input value={form.model} onChange={(e) => handleChange('model', e.target.value)} />
-          </label>
-
-          <label>
-            <span>OpenAI API Type</span>
-            <select value={form.apiType} onChange={(e) => handleChange('apiType', e.target.value)}>
-              <option value="responses">responses</option>
-              <option value="chat">chat</option>
-            </select>
-          </label>
-
-          <button className="run-btn" type="submit" disabled={isRunning}>
-            {isRunning ? 'Analyzing…' : 'Run Analysis'}
-          </button>
-        </form>
-
-        {error ? (
-          <div className="error-stack">
-            <p className="error-box">{error}</p>
-            {errorDetail ? (
-              <details className="error-detail" open>
-                <summary>错误详情（Provider 返回）</summary>
-                <pre>{JSON.stringify(errorDetail, null, 2)}</pre>
+      <section className="chat-main">
+        <header className="chat-main-topbar">
+          <p className="chat-main-title">
+            {activeSession?.label || 'GitHub Issue 分析'}
+          </p>
+          <div className="chat-main-meta">
+            <span className="chat-main-status">{statusText}</span>
+            {traceSummary.stageItems.length > 0 ? (
+              <details className="trace-stage-details">
+                <summary className="trace-stage-summary">阶段状态 · {traceSummary.stageItems.length} 项</summary>
+                <ol className="trace-stage-list">
+                  {traceSummary.stageItems.map((item) => (
+                    <li key={item.stage} className={`trace-stage-item trace-stage-item-${item.status}`}>
+                      <code>{item.stage}</code>
+                      <span>
+                        {item.status === 'start' ? '进行中' : item.status === 'success' ? '完成' : '失败'}
+                      </span>
+                    </li>
+                  ))}
+                </ol>
               </details>
             ) : null}
           </div>
-        ) : null}
-      </section>
+        </header>
 
-      {trace.length > 0 ? (
-        <section className="trace-shell">
-          <details className="trace-disclosure">
-            <summary>
-              <span className="trace-title">思考过程（可展开）</span>
-              <span className="trace-summary-meta">
-                {traceSummary?.latest ? (
-                  <span className={`trace-latest trace-latest-${traceSummary.latest.status}`}>
-                    最新：{traceSummary.latest.stage} · {traceSummary.latestStatusText}
-                  </span>
-                ) : null}
-                <span>阶段 {traceSummary?.startedCount ?? 0}</span>
-                <span>完成 {traceSummary?.finishedCount ?? 0}</span>
-                <span>错误 {traceSummary?.errorCount ?? 0}</span>
-              </span>
-            </summary>
-
-            <article className="trace-card">
-              <header className="trace-head">
-                <h3>请求过程追踪</h3>
-                <p>仅在你展开时展示完整阶段细节，默认保持界面简洁。</p>
-              </header>
-
-              <ol className="trace-list">
-                {trace.map((event, index) => (
-                  <li
-                    key={`${event.stage}-${event.timestamp}-${index}`}
-                    className={`trace-item trace-item-${event.status}`}
-                  >
-                    <div className="trace-item-main">
-                      <span className={`trace-status trace-status-${event.status}`}>{event.status}</span>
-                      <code>{event.stage}</code>
-                    </div>
-                    <div className="trace-item-meta">
-                      <span>{formatTimeLabel(event.timestamp)}</span>
-                      {typeof event.durationMs === 'number' ? (
-                        <span>{event.durationMs}ms</span>
-                      ) : (
-                        <span>-</span>
-                      )}
-                    </div>
-                    {event.detail ? <pre>{JSON.stringify(event.detail, null, 2)}</pre> : null}
-                  </li>
-                ))}
-              </ol>
-            </article>
-          </details>
-        </section>
-      ) : null}
-
-      {result ? (
-        <section className="report-shell report-shell-single">
-          <article className="report-document">
-            <div className="markdown-body">
-              <ReactMarkdown
-                remarkPlugins={[remarkGfm]}
-                components={{
-                  a: ({ node: _node, ...props }) => (
-                    <a {...props} target="_blank" rel="noreferrer noopener" />
-                  ),
-                }}
-              >
-                {result.markdown || ''}
-              </ReactMarkdown>
-            </div>
-
-            <details className="artifact-details artifact-details-report">
-              <summary>查看报告产物路径</summary>
-              <div className="artifacts">
-                <h3>Artifacts</h3>
-                <p>
-                  Markdown: <code>{result.reportMarkdownPath}</code>
-                </p>
-                <p>
-                  JSON(meta): <code>{result.reportJsonPath}</code>
-                </p>
-                <p>
-                  Issue Understanding: <code>{result.issueUnderstandingPath}</code>
-                </p>
-                <p>
-                  Code Investigation: <code>{result.codeInvestigationPath}</code>
-                </p>
-                <p>
-                  Execution Plan: <code>{result.executionPlanPath}</code>
-                </p>
-                {result.tracePath ? (
-                  <p>
-                    Trace: <code>{result.tracePath}</code>
-                  </p>
-                ) : null}
-                <p>
-                  Output Dir: <code>{result.outputDir}</code>
-                </p>
+        <div className="chat-main-canvas">
+          {showReport ? (
+            <article className="chat-report">
+              <div className="markdown-body">
+                <ReactMarkdown
+                  remarkPlugins={[remarkGfm]}
+                  components={{
+                    a: ({ node: _node, ...props }) => <a {...props} target="_blank" rel="noreferrer noopener" />,
+                  }}
+                >
+                  {activeSession.markdown}
+                </ReactMarkdown>
               </div>
-            </details>
-          </article>
-        </section>
-      ) : null}
+
+              {activeSession.result ? (
+                <details className="artifact-details artifact-details-report">
+                  <summary>查看报告产物路径</summary>
+                  <div className="artifacts">
+                    <h3>Artifacts</h3>
+                    <p>
+                      Markdown: <code>{activeSession.result.reportMarkdownPath}</code>
+                    </p>
+                    <p>
+                      JSON(meta): <code>{activeSession.result.reportJsonPath}</code>
+                    </p>
+                    <p>
+                      Issue Understanding: <code>{activeSession.result.issueUnderstandingPath}</code>
+                    </p>
+                    <p>
+                      Code Investigation: <code>{activeSession.result.codeInvestigationPath}</code>
+                    </p>
+                    <p>
+                      Execution Plan: <code>{activeSession.result.executionPlanPath}</code>
+                    </p>
+                    {activeSession.result.tracePath ? (
+                      <p>
+                        Trace: <code>{activeSession.result.tracePath}</code>
+                      </p>
+                    ) : null}
+                    <p>
+                      Output Dir: <code>{activeSession.result.outputDir}</code>
+                    </p>
+                  </div>
+                </details>
+              ) : null}
+            </article>
+          ) : null}
+
+          {showFailureOnly ? (
+            <section className="chat-state-card">
+              <p className="error-box">{activeSession.error}</p>
+              {activeSession.errorDetail ? (
+                <details className="error-detail" open>
+                  <summary>错误详情（Provider 返回）</summary>
+                  <pre>{JSON.stringify(activeSession.errorDetail, null, 2)}</pre>
+                </details>
+              ) : null}
+            </section>
+          ) : null}
+
+          {showProgressOnly ? (
+            <section className="chat-state-card chat-state-running">
+              <p className="chat-state-title">正在分析 Issue</p>
+              <p className="chat-state-copy">
+                当前已启动代码分析流程，右侧报告会在生成过程中持续更新。
+              </p>
+              <div className="chat-state-pulse" aria-hidden />
+            </section>
+          ) : null}
+
+          {showEmptyResult ? (
+            <section className="chat-state-card">
+              <p className="chat-state-title">分析已完成</p>
+              <p className="chat-state-copy">未接收到 Markdown 报告正文，请重新发起一次分析。</p>
+            </section>
+          ) : null}
+
+          {showWelcome ? (
+            <section className="chat-empty-state">
+              <p className="chat-empty-subtitle">粘贴一个 GitHub Issue URL，我会生成结构化分析报告。</p>
+              <form className="chat-empty-form" onSubmit={handleSubmit}>
+                <div className="chat-prompt-shell">
+                  <input
+                    className="chat-url-input"
+                    value={form.issueUrl}
+                    onChange={(e) => setForm({ issueUrl: e.target.value })}
+                    placeholder="输入 GitHub Issue URL，例如 https://github.com/vercel/ai/issues/123"
+                    required
+                  />
+                  <button
+                    className="chat-send-btn"
+                    type="submit"
+                    disabled={Boolean(runningSessionId)}
+                    aria-label={runningSessionId ? '分析中' : '提交分析'}
+                    title={runningSessionId ? '分析中' : '提交分析'}
+                  >
+                    {runningSessionId ? '…' : <SendArrowIcon />}
+                  </button>
+                </div>
+              </form>
+            </section>
+          ) : null}
+        </div>
+
+      </section>
     </main>
   );
 }

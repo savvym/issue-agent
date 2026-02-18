@@ -18,6 +18,7 @@ interface RunReportWriterMarkdownParams {
   artifacts: ArtifactPaths;
   rootDir: string;
   language: string;
+  onTextDelta?: (delta: string) => void;
 }
 
 export async function runReportWriterMarkdownAgent(
@@ -66,5 +67,6 @@ export async function runReportWriterMarkdownAgent(
     model: params.model,
     system,
     prompt,
+    onTextDelta: params.onTextDelta,
   });
 }

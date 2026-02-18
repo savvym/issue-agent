@@ -10,6 +10,7 @@ export const defaultProviderSettings = {
   githubToken: '',
   apiType: 'responses',
   defaultModel: 'gpt-4.1',
+  language: 'zh-CN',
 };
 
 function normalizeApiType(value) {
@@ -17,6 +18,9 @@ function normalizeApiType(value) {
 }
 
 export function normalizeProviderSettings(raw = {}) {
+  const normalizedLanguage =
+    typeof raw.language === 'string' && raw.language.trim() ? raw.language.trim() : 'zh-CN';
+
   return {
     providerType: 'openai',
     baseURL: typeof raw.baseURL === 'string' ? raw.baseURL.trim() : '',
@@ -28,6 +32,7 @@ export function normalizeProviderSettings(raw = {}) {
     apiType: normalizeApiType(raw.apiType),
     defaultModel:
       typeof raw.defaultModel === 'string' && raw.defaultModel.trim() ? raw.defaultModel.trim() : 'gpt-4.1',
+    language: normalizedLanguage,
   };
 }
 

@@ -4,6 +4,7 @@
 输入一个 Issue 链接（或仓库 + 编号），系统会自动拉取 issue / comments / 代码证据，生成可落地的分析报告（Markdown）。
 
 ![Issue Agent](./imgs/index.png)
+![Issue Agent Example](./imgs/exampe.png)
 
 ---
 
@@ -91,7 +92,7 @@ npm run dev
 ### Web（推荐）
 
 1. 在 `/settings` 配置模型与 GitHub Token（可覆盖服务端 env）
-2. 在首页输入 Issue URL 或 `repo + issueNumber`
+2. 在首页仅输入 Issue URL（模型、API type、语言等均从 settings 读取）
 3. 点击 `Run Analysis`
 4. 运行中可展开 `思考过程（可展开）` 查看阶段细节
 5. 完成后直接查看渲染后的 Markdown 报告
@@ -120,7 +121,20 @@ npm run analyze:issue -- \
 - `POST /api/analyze`
 - 请求结束后一次性返回结果
 
-### 异步模式（前端默认）
+### 实时流式模式（前端默认）
+
+- `POST /api/analyze/stream`：SSE 实时推送阶段事件与报告增量文本
+
+SSE 事件：
+
+- `ready`
+- `trace`
+- `report-delta`
+- `result`
+- `error`
+- `done`
+
+### 异步模式（兼容保留）
 
 - `POST /api/analyze/start`：启动任务，返回 `runId`
 - `GET /api/analyze/status?runId=<id>&after=<n>`：轮询状态与增量 trace

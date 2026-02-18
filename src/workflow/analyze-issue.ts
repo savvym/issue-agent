@@ -35,6 +35,7 @@ export interface AnalyzeIssueOptions {
   openaiProviderName?: string;
   githubToken?: string;
   trace?: (event: AnalyzeTraceEvent) => void;
+  reportDelta?: (delta: string) => void;
 }
 
 export interface AnalyzeIssueResult {
@@ -336,6 +337,7 @@ export async function analyzeIssue(options: AnalyzeIssueOptions): Promise<Analyz
         },
         rootDir: options.rootDir,
         language: options.language,
+        onTextDelta: options.reportDelta,
       }),
     {
       understandingLength: understanding.markdown.length,

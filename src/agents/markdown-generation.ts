@@ -43,9 +43,42 @@ interface GenerateMarkdownParams {
   model: ModelLike;
   system: string;
   prompt: string;
+  onTextDelta?: (delta: string) => void;
 }
 
 export async function generateMarkdownText(params: GenerateMarkdownParams): Promise<string> {
+  if (params.onTextDelta) {
+    try {
+      const streamed = streamText({
+        model: params.model,
+        system: params.system,
+        prompt: params.prompt,
+      });
+
+      let combined = '';
+      for await (const delta of streamed.textStream) {
+        combined += delta;
+        params.onTextDelta(delta);
+      }
+
+      return combined.trim();
+    } catch (error) {
+      if (!shouldFallbackToStreaming(error)) {
+        // If streaming itself fails for other reasons, fallback once to non-stream.
+        const fallback = await generateText({
+          model: params.model,
+          system: params.system,
+          prompt: params.prompt,
+        });
+        const text = (fallback.text || '').trim();
+        if (text) {
+          params.onTextDelta(text);
+        }
+        return text;
+      }
+    }
+  }
+
   try {
     const result = await generateText({
       model: params.model,
