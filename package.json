@@ -1,0 +1,36 @@
+{
+  "name": "issue-analysis-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "predev": "npm run build",
+    "dev": "next dev",
+    "build": "tsc -p tsconfig.agent.json",
+    "prebuild:web": "npm run build",
+    "build:web": "next build",
+    "prestart": "npm run build",
+    "start": "next start",
+    "typecheck": "tsc -p tsconfig.agent.json --noEmit",
+    "analyze:issue": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@ai-sdk/openai": "^3.0.29",
+    "@octokit/rest": "^22.0.0",
+    "ai": "^6.0.87",
+    "commander": "^14.0.0",
+    "dotenv": "^17.2.3",
+    "next": "^16.1.6",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
+    "zod": "^4.1.12"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "@types/react": "19.2.14",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  }
+}
